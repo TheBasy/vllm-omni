@@ -278,6 +278,13 @@ class OmniRequestOutput:
 
     # Pass-through properties keep vLLM serving codepaths compatible with
     # OmniRequestOutput for pipeline outputs (Issue #345).
+    def _request_outputs_list(self) -> list[RequestOutput]:
+        if self.request_output is None:
+            return []
+        if isinstance(self.request_output, list):
+            return list(self.request_output)
+        return [self.request_output]
+
     @property
     def prompt_token_ids(self) -> list[int] | None:
         """Return prompt token IDs from the underlying request output.
@@ -285,8 +292,9 @@ class OmniRequestOutput:
         This property is required for compatibility with vLLM's streaming
         chat completion generator which checks res.prompt_token_ids.
         """
-        if self.request_output is not None:
-            return getattr(self.request_output, "prompt_token_ids", None)
+        request_outputs = self._request_outputs_list()
+        if request_outputs:
+            return getattr(request_outputs[0], "prompt_token_ids", None)
         return None
 
     @property
@@ -296,36 +304,41 @@ class OmniRequestOutput:
         This property is required for compatibility with vLLM's streaming
         and non-streaming chat completion generators.
         """
-        if self.request_output is not None:
-            return getattr(self.request_output, "outputs", [])
-        return []
+        outputs: list[Any] = []
+        for req_out in self._request_outputs_list():
+            outputs.extend(getattr(req_out, "outputs", []) or [])
+        return outputs
 
     @property
     def encoder_prompt_token_ids(self) -> list[int] | None:
         """Return encoder prompt token IDs from the underlying request output."""
-        if self.request_output is not None:
-            return getattr(self.request_output, "encoder_prompt_token_ids", None)
+        request_outputs = self._request_outputs_list()
+        if request_outputs:
+            return getattr(request_outputs[0], "encoder_prompt_token_ids", None)
         return None
 
     @property
     def prompt_logprobs(self) -> Any:
         """Return prompt logprobs from the underlying request output."""
-        if self.request_output is not None:
-            return getattr(self.request_output, "prompt_logprobs", None)
+        request_outputs = self._request_outputs_list()
+        if request_outputs:
+            return getattr(request_outputs[0], "prompt_logprobs", None)
         return None
 
     @property
     def num_cached_tokens(self) -> int | None:
         """Return number of cached tokens from the underlying request output."""
-        if self.request_output is not None:
-            return getattr(self.request_output, "num_cached_tokens", None)
+        request_outputs = self._request_outputs_list()
+        if request_outputs:
+            return getattr(request_outputs[0], "num_cached_tokens", None)
         return None
 
     @property
     def kv_transfer_params(self) -> Any:
         """Return KV transfer params from the underlying request output."""
-        if self.request_output is not None:
-            return getattr(self.request_output, "kv_transfer_params", None)
+        request_outputs = self._request_outputs_list()
+        if request_outputs:
+            return getattr(request_outputs[0], "kv_transfer_params", None)
         return None
 
     @property

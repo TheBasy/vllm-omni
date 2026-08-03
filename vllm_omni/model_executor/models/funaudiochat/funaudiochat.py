@@ -147,16 +147,6 @@ class FunAudioChatForConditionalGeneration(_NativeFunAudioChatBase, SupportsMult
         self._speech_ids_gpu_state: dict[str, torch.Tensor] = {}
 
     @staticmethod
-    def _move_nested_to_cpu(value: Any) -> Any:
-        if isinstance(value, torch.Tensor):
-            return value.detach().to("cpu").contiguous()
-        if isinstance(value, tuple):
-            return tuple(FunAudioChatForConditionalGeneration._move_nested_to_cpu(v) for v in value)
-        if isinstance(value, list):
-            return [FunAudioChatForConditionalGeneration._move_nested_to_cpu(v) for v in value]
-        return value
-
-    @staticmethod
     def _move_nested_to_device(value: Any, device: torch.device) -> Any:
         if isinstance(value, torch.Tensor):
             return value.to(device=device)
@@ -374,10 +364,10 @@ class FunAudioChatForConditionalGeneration(_NativeFunAudioChatBase, SupportsMult
         try:
             backend_cls = self.get_language_model().model.layers[0].self_attn.attn.get_attn_backend()
             backend_name = str(backend_cls.get_name())
-        except Exception:
+        except (AttributeError, IndexError, TypeError):
             backend_name = "UNKNOWN"
         if not self._logged_stage0_backend:
-            logger.info("FunAudioChat stage-0 native language backend: %s", backend_name)
+            logger.debug("FunAudioChat stage-0 native language backend: %s", backend_name)
             self._logged_stage0_backend = True
         return backend_name
 
@@ -637,17 +627,10 @@ class FunAudioChatForConditionalGeneration(_NativeFunAudioChatBase, SupportsMult
                 expected = int(is_multimodal.sum().item())
                 got = int(sum(e.shape[0] for e in mm_embeds))
                 if expected != got:
-                    # Invariant broken (placeholder count != audio embed rows):
-                    # degrade to text embeddings + warn rather than crash. The
-                    # single-chunk prefill config never triggers this; it is a
-                    # safety net for chunked-prefill / future multi-audio cases.
-                    logger.warning(
-                        "FunAudioChat prefill audio merge skipped: placeholder "
-                        "count %d != audio embed rows %d (req_id=%s); falling "
-                        "back to text embeddings.",
-                        expected,
-                        got,
-                        _req_id,
+                    raise ValueError(
+                        "FunAudioChat prefill audio placeholder count "
+                        f"({expected}) does not match audio embedding rows "
+                        f"({got}) for request {_req_id}."
                     )
                 elif expected > 0:
                     req_embeds = self.embed_input_ids(
@@ -842,6 +825,8 @@ class FunAudioChatForConditionalGeneration(_NativeFunAudioChatBase, SupportsMult
         if sampled_token_ids.ndim == 2 and sampled_token_ids.shape[-1] != 1:
             return sampled_token_ids
 
+        # Preserve the runner-owned sampled tensor while rewriting the small
+        # per-request token vector for the speech sidecar state machine.
         updated_token_ids = sampled_token_ids.clone()
         audio_bos_id = int(self.config.text_config.audio_bos_index)
         audio_eos_id = int(self.config.text_config.audio_eos_index)
@@ -858,9 +843,14 @@ class FunAudioChatForConditionalGeneration(_NativeFunAudioChatBase, SupportsMult
 
             token_slot = updated_token_ids[idx] if updated_token_ids.ndim == 1 else updated_token_ids[idx, 0]
             original_token_id = int(token_slot.item())
-            speech_active = bool(ss.get(_GENERATE_SPEECH_KEY, req_buffer.get(_GENERATE_SPEECH_KEY, False)))
+            speech_active = bool(
+                ss.get(_GENERATE_SPEECH_KEY, req_buffer.get(_GENERATE_SPEECH_KEY, False))
+            )
             force_audio_bos_pending = bool(
-                ss.get(_FORCE_AUDIO_BOS_KEY, req_buffer.get(_FORCE_AUDIO_BOS_KEY, self.sp_gen_kwargs["force_text_abos"]))
+                ss.get(
+                    _FORCE_AUDIO_BOS_KEY,
+                    req_buffer.get(_FORCE_AUDIO_BOS_KEY, self.sp_gen_kwargs["force_text_abos"]),
+                )
             )
             finish_speech = bool(ss.pop(_FINISH_SPEECH_KEY, req_buffer.pop(_FINISH_SPEECH_KEY, False)))
 

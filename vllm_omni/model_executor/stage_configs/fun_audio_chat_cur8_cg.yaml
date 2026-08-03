@@ -4,10 +4,10 @@ stage_args:
   - stage_id: 0
     stage_type: llm
     runtime:
-      devices: "1"
-      max_batch_size: 8            # ⬅️ BS=8
+      devices: "0"
+      max_batch_size: 8            # batch size 8
     engine_args:
-      model: /home/models/FunAudioLLM/Fun-Audio-Chat-8B
+      model: FunAudioLLM/Fun-Audio-Chat-8B
       model_stage: s2s
       model_arch: FunAudioChatForConditionalGeneration
       hf_overrides:
@@ -23,8 +23,8 @@ stage_args:
       engine_output_type: latent
       max_model_len: 8192
       max_num_batched_tokens: 8192
-      enforce_eager: false         # ⬅️ [关键] 重新启用 CUDA Graph
-      cudagraph_capture_sizes: [1, 2, 4, 8] # ⬅️ [关键] 显式声明需捕获的 batch size      
+      enforce_eager: false         # re-enable CUDA Graph
+      cudagraph_capture_sizes: [1, 2, 4, 8] # explicitly declare batch sizes to capture
       distributed_executor_backend: "mp"
       dtype: bfloat16
     final_output: true
@@ -43,23 +43,23 @@ stage_args:
   - stage_id: 1
     stage_type: llm
     runtime:
-      devices: "1"
-      max_batch_size: 8            # ⬅️ BS=8
+      devices: "0"
+      max_batch_size: 8            # batch size 8
     engine_args:
-      model: /home/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512
+      model: FunAudioLLM/Fun-CosyVoice3-0.5B-2512
       model_stage: code2wav
       model_arch: FunAudioChatCosyVoice3Code2Wav
       worker_type: generation
       scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
       trust_remote_code: true
       enable_prefix_caching: false
-      gpu_memory_utilization: 0.25 
+      gpu_memory_utilization: 0.25
       engine_output_type: audio
-      max_model_len: 8192          # ✅ 保留安全阀，防止推理时 OOM
+      max_model_len: 8192          # keep a safety cap to avoid OOM at inference time
       max_num_batched_tokens: 32768
       skip_tokenizer_init: true
-      enforce_eager: true          # ⬅️ [关键] 关闭 CUDA Graph
-      # cudagraph_capture_sizes 已移除
+      enforce_eager: true          # disable CUDA Graph
+      # cudagraph_capture_sizes removed
       distributed_executor_backend: "mp"
       dtype: bfloat16
     engine_input_source: [0]
@@ -73,4 +73,3 @@ stage_args:
       max_tokens: 1
       detokenize: true
       seed: 42
-

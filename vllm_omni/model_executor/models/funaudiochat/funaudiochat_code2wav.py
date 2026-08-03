@@ -15,6 +15,7 @@ from huggingface_hub import snapshot_download
 from torch.nn import functional as F
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_omni.data_entry_keys import to_struct
 from vllm_omni.model_executor.models.cosyvoice3.cosyvoice3_code2wav import CosyVoice3Code2Wav
@@ -184,7 +185,7 @@ class FunAudioChatCosyVoice3Code2Wav(nn.Module):
         )
         if is_dummy_profile and token_batches[0].shape[1] > self._dummy_profile_token_len:
             if not self._logged_dummy_profile_cap:
-                logger.info(
+                logger.debug(
                     "FunAudioChat code2wav dummy/profile run detected. Capping decode length from %d to %d tokens.",
                     token_batches[0].shape[1],
                     self._dummy_profile_token_len,
@@ -225,6 +226,8 @@ class FunAudioChatCosyVoice3Code2Wav(nn.Module):
             return fade_in_tensor
 
         fade_window = torch.as_tensor(window, device=fade_in_tensor.device, dtype=fade_in_tensor.dtype)
+        # The caller retains the unmodified chunk for cache bookkeeping, so
+        # blend into a separate output tensor.
         mixed = fade_in_tensor.clone()
         mixed[..., :overlap] = (
             mixed[..., :overlap] * fade_window[:overlap] + fade_out_tensor[..., -overlap:] * fade_window[-overlap:]
@@ -368,7 +371,7 @@ class FunAudioChatCosyVoice3Code2Wav(nn.Module):
         measured = int(probe_speech.reshape(probe_speech.shape[0], -1).shape[1])
         with self._stream_audio_cache_lock:
             measured = self._funaudiochat_hift_overlap_samples.setdefault(key, measured)
-        logger.info(
+        logger.debug(
             "FunAudioChat HiFT measured overlap: mel=%d finalize=%s samples=%d",
             key[0],
             key[1],
@@ -660,18 +663,26 @@ class FunAudioChatCosyVoice3Code2Wav(nn.Module):
 
         return tts_speech.reshape(-1).to(dtype=torch.float32)
 
+    def on_requests_finished(self, finished_req_ids: set[str] | list[str]) -> None:
+        """Release streaming vocoder state for completed or aborted requests."""
+        with self._stream_audio_cache_lock:
+            for req_id in finished_req_ids:
+                self._stream_vocoder_cache_by_req.pop(req_id, None)
+
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         intermediate_tensors: Any = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs: Any,
+        sampling_metadata: SamplingMetadata | None = None,
+        seq_token_counts: list[int] | None = None,
+        model_intermediate_buffer: list[dict[str, Any]] | None = None,
+        runtime_additional_information: list[dict[str, Any]] | None = None,
+        **_: Any,
     ) -> OmniOutput:
         del positions, intermediate_tensors, inputs_embeds
 
-        sampling_metadata = kwargs.get("sampling_metadata")
-        seq_token_counts = kwargs.get("seq_token_counts")
         token_batches, is_dummy_profile = self._build_decode_tokens(
             input_ids,
             sampling_metadata,
@@ -691,9 +702,9 @@ class FunAudioChatCosyVoice3Code2Wav(nn.Module):
         # (gpu_model_runner.py:1338). When a chunk carries route fields
         # (stream_finished/left_context_size) we decode it incrementally with the
         # carried vocoder cache; otherwise we fall back to the full-segment path.
-        runtime_info = kwargs.get("model_intermediate_buffer")
+        runtime_info = model_intermediate_buffer
         if runtime_info is None:
-            runtime_info = kwargs.get("runtime_additional_information")
+            runtime_info = runtime_additional_information
         if runtime_info is not None and not isinstance(runtime_info, list):
             runtime_info = []
 
@@ -704,18 +715,19 @@ class FunAudioChatCosyVoice3Code2Wav(nn.Module):
                 if runtime_info is not None and idx < len(runtime_info) and isinstance(runtime_info[idx], dict)
                 else {}
             )
-            # ``to_struct`` validates against the OmniPayloadStruct schema
-            # (forbid_unknown_fields). Non-streaming calls may carry unrelated
-            # keys, so schema drift must not break the full-segment fallback.
-            try:
-                meta = to_struct(raw).meta
-            except Exception:
-                meta = None
-            uses_streaming = meta is not None and (
-                getattr(meta, "stream_finished", None) is not None
-                or getattr(meta, "left_context_size", None) is not None
+            # Non-streaming calls may carry unrelated keys, so only validate
+            # payloads that declare streaming route fields. Malformed streaming
+            # payloads should fail validation instead of being silently ignored.
+            raw_meta = raw.get("meta")
+            uses_streaming = raw_meta is not None and (
+                (
+                    isinstance(raw_meta, dict)
+                    and ("stream_finished" in raw_meta or "left_context_size" in raw_meta)
+                )
+                or getattr(raw_meta, "stream_finished", None) is not None
+                or getattr(raw_meta, "left_context_size", None) is not None
             )
-            stream_metas.append(meta if uses_streaming else None)
+            stream_metas.append(to_struct(raw).meta if uses_streaming else None)
 
         has_streaming_metadata = any(meta is not None for meta in stream_metas)
         if is_dummy_profile and not has_streaming_metadata:

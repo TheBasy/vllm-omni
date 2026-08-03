@@ -137,7 +137,7 @@ def funaudiochat2code2wav(
             # ``if not next_inputs`` path finalize the request without invoking
             # the code2wav stage on an empty prompt (which would crash the
             # generation scheduler with a negative token budget).
-            logger.info(
+            logger.debug(
                 "FunAudioChat stage0->stage1: no audio_token_ids for request; skipping code2wav (text-only output)."
             )
             continue
@@ -147,7 +147,7 @@ def funaudiochat2code2wav(
         ]
         raw_min = int(flat_audio_token_ids.min().item()) if flat_audio_token_ids.numel() > 0 else None
         raw_max = int(flat_audio_token_ids.max().item()) if flat_audio_token_ids.numel() > 0 else None
-        logger.info(
+        logger.debug(
             "FunAudioChat stage0->stage1 audio tokens: raw_len=%d filtered_len=%d raw_min=%s raw_max=%s tail=%s",
             flat_audio_token_ids.numel(),
             filtered.numel(),
@@ -158,7 +158,7 @@ def funaudiochat2code2wav(
         if filtered.numel() == 0:
             # Audio tower produced only placeholder/padding tokens (no usable
             # codec ids). Skip rather than feeding an empty prompt to code2wav.
-            logger.info(
+            logger.debug(
                 "FunAudioChat stage0->stage1: filtered audio tokens empty; skipping code2wav."
             )
             continue
@@ -243,7 +243,7 @@ def funaudiochat2code2wav_async_chunk(
             "is_first_chunk": True,
             "terminal_sent": False,
         }
-        logger.info(
+        logger.debug(
             "FAC async config: req=%s steady_hop=%d initial_hop=%d pre_lookahead=%d "
             "flow_mode=bounded segment_tokens=%d",
             request_id,

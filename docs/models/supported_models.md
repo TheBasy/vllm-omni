@@ -98,3 +98,8 @@ th {
 |`HiDreamImagePipeline` | HiDream-I1-Full | `HiDream-ai/HiDream-I1-Full` | ✅︎ | ✅︎ | | |
 
 ✅︎ indicates the model is supported on that backend. Empty cells mean not listed as supported on that backend.
+
+Fun-Audio-Chat requires the upstream Fun-Audio-Chat source package to be
+importable. Install it in the serving environment or set `FUN_AUDIO_CHAT_HOME`
+to its checkout. Stage 1 also needs speaker metadata from
+`FUN_AUDIO_CHAT_SPK_INFO` or `<FUN_AUDIO_CHAT_HOME>/utils/new_spk2info.pt`.

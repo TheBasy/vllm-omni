@@ -6,5 +6,3 @@
 # both the model registry and pipeline registry import submodules
 # directly — heavy imports here would be loaded as a side effect
 # even though nothing depends on these re-exports.
-
-__all__ = ["FunAudioChatForConditionalGeneration", "FunAudioChatCosyVoice3Code2Wav"]

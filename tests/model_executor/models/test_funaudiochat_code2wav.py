@@ -3,12 +3,15 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_omni.model_executor.models.funaudiochat.funaudiochat_code2wav import (
     FunAudioChatCosyVoice3Code2Wav,
 )
 from vllm_omni.model_executor.models.output_templates import OmniOutput
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_split_tokens_like_official_keeps_short_inputs_as_single_segment():
@@ -201,6 +204,16 @@ def test_forward_streams_incrementally_and_carries_cache_across_chunks():
     call3 = model._forward_calls[-1]
     assert call3["finalize"] is True
     assert "r1" not in model._stream_vocoder_cache_by_req
+
+
+def test_on_requests_finished_releases_only_completed_request_cache():
+    model = _build_streaming_stub()
+    model._stream_vocoder_cache_by_req = {"r1": {"cache": 1}, "r2": {"cache": 2}}
+
+    model.on_requests_finished(["r1"])
+
+    assert "r1" not in model._stream_vocoder_cache_by_req
+    assert model._stream_vocoder_cache_by_req["r2"] == {"cache": 2}
 
 
 def test_forward_empty_terminal_chunk_flushes_fixed_hift_state():

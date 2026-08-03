@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import defaultdict
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_omni.model_executor.stage_input_processors.funaudiochat import (
@@ -25,6 +26,8 @@ from vllm_omni.model_executor.stage_input_processors.funaudiochat import (
     _FAC_TOKEN_HOP_LEN,
     funaudiochat2code2wav_async_chunk,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 _INITIAL_HOP = _FAC_INITIAL_TOKEN_HOP_LEN  # 10 — fast first-chunk hop
 _HOP = _FAC_TOKEN_HOP_LEN  # 50 — steady-state hop after the first chunk

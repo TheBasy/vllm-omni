@@ -2104,7 +2104,11 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                             choices_data.error.message,
                         )
                         continue
-                    first_audio_chunk = False
+                    # Metadata-only audio messages use an empty delta and must
+                    # not consume the one-time WAV header. Keep the flag set
+                    # until a chunk containing encoded audio is emitted.
+                    if any(getattr(choice.delta, "content", None) for choice in choices_data):
+                        first_audio_chunk = False
                     # Only emit finish_reason on the last modality to
                     # comply with OpenAI streaming spec.
                     for choice in choices_data:
@@ -2730,6 +2734,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 audio_tensor = torch.cat(audio_data, dim=-1)
         else:
             audio_tensor = audio_data
+        if audio_tensor is not None and audio_tensor.numel() == 0:
+            audio_tensor = None
         if audio_tensor is None:
             if not stream:
                 return self._create_error_response("Audio generation completed but no audio was produced.")
@@ -2776,7 +2782,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         # PCM on every subsequent chunk, so clients can concatenate the delta
         # bytes into one valid WAV stream. Emitting a WAV header per chunk
         # would inject 44 bytes of "RIFF..WAVE..data" into the middle of the
-        # PCM stream, which decoders play as a loud pop/blast (爆破音) at each
+        # PCM stream, which decoders play as a loud pop/blast at each
         # chunk boundary.
         if stream and audio_format == "wav":
             pcm_obj = CreateAudio(

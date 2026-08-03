@@ -8,6 +8,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from functools import cached_property
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import numpy as np
@@ -29,7 +30,7 @@ from vllm.multimodal.processing import (
 )
 
 
-def ensure_funaudiochat_importable() -> Any:
+def ensure_funaudiochat_importable() -> ModuleType:
     try:
         import funaudiochat  # type: ignore
 

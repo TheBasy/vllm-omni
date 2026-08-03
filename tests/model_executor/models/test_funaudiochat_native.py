@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from transformers.generation.logits_process import (
     RepetitionPenaltyLogitsProcessor,
@@ -13,6 +14,8 @@ from vllm_omni.model_executor.models.funaudiochat.funaudiochat import (
     DEFAULT_SP_GEN_KWARGS,
     FunAudioChatForConditionalGeneration,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def _make_model_stub(
@@ -628,20 +631,17 @@ def test_preprocess_prefill_without_mm_features_keeps_text_embeddings():
     assert torch.equal(req_embeds, torch.zeros((4, 4), dtype=torch.float32))
 
 
-def test_preprocess_prefill_skips_merge_when_placeholder_count_mismatch():
-    """If placeholder count != audio embed rows, degrade to text embeddings (no crash)."""
-    # 3 placeholder positions but only 2 audio rows -> mismatch -> fallback.
+def test_preprocess_prefill_rejects_placeholder_count_mismatch():
+    """A placeholder/audio-row mismatch must fail instead of dropping audio."""
     model, audio_tok, _ = _make_model_stub_for_audio_read(num_audio_rows=2)
     input_ids = torch.tensor([1, audio_tok, audio_tok, audio_tok, 2], dtype=torch.long)
 
-    _, req_embeds, _ = model.preprocess(
-        input_ids=input_ids,
-        input_embeds=None,
-        mm_features=[SimpleNamespace(modality="audio")],
-    )
-
-    # Fell back to text embeddings (zeros); audio merge was skipped.
-    assert torch.equal(req_embeds, torch.zeros((5, 4), dtype=torch.float32))
+    with pytest.raises(ValueError, match="placeholder count"):
+        model.preprocess(
+            input_ids=input_ids,
+            input_embeds=None,
+            mm_features=[SimpleNamespace(modality="audio")],
+        )
 
 
 def test_preprocess_decode_span_does_not_read_user_audio():

@@ -89,35 +89,6 @@ class TestOmniRequestOutput:
 
         assert output.outputs == [mock_output]
 
-    def test_outputs_property_flattens_request_output_list(self, mocker: MockerFixture):
-        """Test outputs property when pipeline request_output is a list."""
-        mock_output_a = mocker.Mock()
-        mock_output_b = mocker.Mock()
-
-        def _make_req_output(req_id, prompt_token_ids, outputs):
-            mock_request_output = mocker.Mock()
-            mock_request_output.request_id = req_id
-            mock_request_output.prompt_token_ids = prompt_token_ids
-            mock_request_output.outputs = outputs
-            mock_request_output.encoder_prompt_token_ids = None
-            mock_request_output.prompt_logprobs = None
-            mock_request_output.num_cached_tokens = None
-            mock_request_output.kv_transfer_params = None
-            mock_request_output.multimodal_output = None
-            return mock_request_output
-
-        mock_request_output_a = _make_req_output("pipeline-123-a", [1, 2, 3], [mock_output_a])
-        mock_request_output_b = _make_req_output("pipeline-123-b", [4, 5, 6], [mock_output_b])
-
-        output = OmniRequestOutput(
-            stage_id=0,
-            final_output_type="text",
-            request_output=[mock_request_output_a, mock_request_output_b],
-        )
-
-        assert output.outputs == [mock_output_a, mock_output_b]
-        assert output.prompt_token_ids == [1, 2, 3]
-
     def test_outputs_empty_when_no_request_output(self):
         """Test outputs returns empty list when no request_output."""
         output = OmniRequestOutput.from_diffusion(

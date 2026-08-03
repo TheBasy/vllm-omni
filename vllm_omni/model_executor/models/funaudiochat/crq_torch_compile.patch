@@ -1,0 +1,185 @@
+diff --git a/funaudiochat/modeling_funaudiochat.py b/funaudiochat/modeling_funaudiochat.py
+index 76fba82..2b9dd9f 100644
+--- a/funaudiochat/modeling_funaudiochat.py
++++ b/funaudiochat/modeling_funaudiochat.py
+@@ -594,6 +594,126 @@ class FunAudioChatDecoder(FunAudioChatPreTrainedModel):
+     def get_embeddings(self, audio_tokens):
+         return self.lm_head.weight.data[audio_tokens]
+-
++
++    # ------------------------------------------------------------------
++    # Refactor only (Step 1 of cudagraph plan): split crq_generate_forward
++    # into three pure sub-operations. Behavior is identical to the original
++    # inlined loop -- no graph, no static KV yet -- so outputs must be
++    # bit-exact with the original. The split isolates (a) the transformer
++    # step that we will later cudagraph, (b) the sampling step that must
++    # stay out of graph, and (c) the token->embed lookup that feeds the
++    # next iteration. State (crq_audio_embeds, crq_past_key_values,
++    # crq_generate_tokens) is read/written exactly as the original did.
++    # ------------------------------------------------------------------
++    def crq_transformer_step(self, i, hidden_states, slen,
++                             output_attentions=None, output_hidden_states=None):
++        """Run one crq_transformer forward for iteration ``i`` of the group.
++
++        Mirrors the original loop body up to and including ``lm_head``:
++        builds the i-th input embed (with the ``i==0`` slice special case),
++        runs crq_transformer with the growing past KV, and projects to
++        codec logits. Reads/writes ``self.crq_past_key_values`` (DynamicCache,
++        unchanged here) and ``self.crq_audio_embeds`` (read here, written by
++        crq_embed_token). Returns ``(logits, lhidden_states)``.
++        """
++        if i == 0:
++            input_embeds = (
++                hidden_states[:, : slen * self.group_size - (self.group_size - i - 1)] + self.crq_audio_embeds
++            )
++        else:
++            input_embeds = (
++                hidden_states[:, slen * self.group_size - (self.group_size - i)] + self.crq_audio_embeds
++            ).unsqueeze(1)
++        input_embeds = self.input_matching(input_embeds)
++        outputs = self.crq_transformer(
++            inputs_embeds=input_embeds,
++            output_attentions=output_attentions,
++            output_hidden_states=output_hidden_states,
++            past_key_values=self.crq_past_key_values,
++            use_cache=True,
++            return_dict=True,
++        )
++        self.crq_past_key_values = outputs.past_key_values
++        lhidden_states = outputs.last_hidden_state
++        lhidden_states = self.output_matching(lhidden_states)
++        logits = self.lm_head(lhidden_states)
++        return logits, lhidden_states
++
++    # ------------------------------------------------------------------
++    # CRQ transformer step is torch.compile'd by default (mode="default",
++    # i.e. inductor kernel fusion -- NOT cudagraph). This fuses the ~18k
++    # per-step eager launches of the 28-layer sidecar into far fewer fused
++    # triton kernels: measured ~18k -> ~7k launches/step, ~60ms -> ~36ms
++    # gpu_busy/step, api_enqueue share halved (stage-0 launch-bound
++    # bottleneck on Fun-Audio-Chat 8B sidecar).
++    #
++    # Set FUNAUDIO_CRQ_COMPILE=0 to fall back to the uncompiled (eager) path
++    # -- an emergency off-switch. reduce-overhead (cudagraph) mode is NOT
++    # used: it crashes on the sidecar's growing DynamicCache (static-buffer
++    # overwrite in Qwen3 apply_rotary_pos_emb). The compiled target is a
++    # plain fn over (module refs + tensors), not a bound method, so torch
++    # can trace it. KV (DynamicCache) is passed in/out; sampling stays eager.
++    # ------------------------------------------------------------------
++    _crq_compiled_step = None  # type: ignore[assignment]
++    _crq_force_eager = os.environ.get("FUNAUDIO_CRQ_COMPILE", "1") == "0"
++
++    @staticmethod
++    def _crq_forward_fn(tower, input_embeds, past_key_values):
++        out = tower.crq_transformer(
++            inputs_embeds=input_embeds,
++            output_attentions=None,
++            output_hidden_states=None,
++            past_key_values=past_key_values,
++            use_cache=True,
++            return_dict=True,
++        )
++        hidden = tower.output_matching(out.last_hidden_state)
++        logits = tower.lm_head(hidden)
++        return logits, hidden, out.past_key_values
++
++    def _crq_compiled_step_get(self):
++        if FunAudioChatDecoder._crq_compiled_step is None:
++            FunAudioChatDecoder._crq_compiled_step = torch.compile(
++                FunAudioChatDecoder._crq_forward_fn, mode="default"
++            )
++        return FunAudioChatDecoder._crq_compiled_step
++
++    def crq_transformer_step_compiled(self, i, hidden_states, slen):
++        """Compiled variant of crq_transformer_step (no output_attentions path;
++        output_attentions/output_hidden_states are forced None for traceability).
++        Only the crq_transformer forward is compiled; input slicing + input_matching
++        and the KV writeback stay eager (cheap, and slicing is shape-dynamic)."""
++        if i == 0:
++            input_embeds = (
++                hidden_states[:, : slen * self.group_size - (self.group_size - i - 1)] + self.crq_audio_embeds
++            )
++        else:
++            input_embeds = (
++                hidden_states[:, slen * self.group_size - (self.group_size - i)] + self.crq_audio_embeds
++            ).unsqueeze(1)
++        input_embeds = self.input_matching(input_embeds)
++        fn = self._crq_compiled_step_get()
++        logits, lhidden_states, pkv = fn(self, input_embeds, self.crq_past_key_values)
++        self.crq_past_key_values = pkv
++        return logits, lhidden_states
++
++    def crq_sample_token(self, logits):
++        """Sample one codec token from logits (multinomial/argmax).
++
++        Returns ``(tokens, logits)`` exactly as the original ``sampling_step``
++        did. Stays OUT of any future cudagraph (multinomial / argmax over a
++        dynamic distribution). Also appends to ``self.crq_generate_tokens``.
++        """
++        tokens, logits = self.sampling_step(logits)
++        self.crq_generate_tokens.append(tokens.unsqueeze(1))
++        return tokens, logits
++
++    def crq_embed_token(self, tokens):
++        """Look up the embedding for a sampled codec token and cache it on
++        ``self.crq_audio_embeds`` for the next iteration's input build.
++        Returns the embedding tensor."""
++        self.crq_audio_embeds = self.get_embeddings(tokens)
++        return self.crq_audio_embeds
++
+     def sampling_step(self, logits):
+         # Copy is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
+         # (the clone itself is always small)
+@@ -637,38 +757,26 @@ class FunAudioChatDecoder(FunAudioChatPreTrainedModel):
+         # Initialize an empty list to collect logits from each step
+         all_logits = []
+         self.crq_generate_tokens = []
++        # Compiled (inductor fusion) is the DEFAULT path; opt out with
++        # FUNAUDIO_CRQ_COMPILE=0 only (eager fallback / emergency switch).
++        crq_compile = not FunAudioChatDecoder._crq_force_eager
+         for i in range(self.group_size):
+-            if i == 0:
+-                input_embeds = (
+-                    hidden_states[:, : slen * self.group_size - (self.group_size - i - 1)] + self.crq_audio_embeds
+-                )
++            if crq_compile:
++                # output_attentions/output_hidden_states forced None in compiled path
++                logits, lhidden_states = self.crq_transformer_step_compiled(i, hidden_states, slen)
+             else:
+-                input_embeds = (
+-                    hidden_states[:, slen * self.group_size - (self.group_size - i)] + self.crq_audio_embeds
+-                ).unsqueeze(1)
+-            input_embeds = self.input_matching(input_embeds)
+-            outputs = self.crq_transformer(
+-                inputs_embeds=input_embeds,
+-                output_attentions=output_attentions,
+-                output_hidden_states=output_hidden_states,
+-                past_key_values=self.crq_past_key_values,
+-                use_cache=True,
+-                return_dict=True,
+-            )
+-            self.crq_past_key_values = outputs.past_key_values
+-            lhidden_states = outputs.last_hidden_state
+-            lhidden_states = self.output_matching(lhidden_states)
+-
+-            logits = self.lm_head(lhidden_states)
+-            crq_audio_tokens, logits = self.sampling_step(logits)
+-            self.crq_generate_tokens.append(crq_audio_tokens.unsqueeze(1))
++                logits, lhidden_states = self.crq_transformer_step(
++                    i, hidden_states, slen,
++                    output_attentions=output_attentions,
++                    output_hidden_states=output_hidden_states,
++                )
++            crq_audio_tokens, logits = self.crq_sample_token(logits)
++            self.crq_embed_token(crq_audio_tokens)
+             if i == 0:
+                 all_logits.append(logits)
+             else:
+                 all_logits.append(logits[:, -1, :].unsqueeze(1))
+-
++
+-            self.crq_audio_embeds = self.get_embeddings(crq_audio_tokens)
+-
+         self.crq_generate_tokens = torch.cat(self.crq_generate_tokens, dim=1)
+         logits = torch.cat(all_logits, dim=1)
+         loss = None
